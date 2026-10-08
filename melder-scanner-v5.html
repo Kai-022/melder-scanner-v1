@@ -1,0 +1,162 @@
+<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Melder Scanner</title><script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script><style>*{box-sizing:border-box}body{margin:0;font-family:system-ui;background:#0b1220;color:#eef2ff}main{max-width:760px;margin:auto;padding:14px}.card{background:#151e2e;border:1px solid #2b374d;border-radius:16px;padding:14px;margin-bottom:12px}video{width:100%;background:#000;border-radius:12px;max-height:55vh}.camera{position:relative;overflow:hidden;border-radius:12px;--x:15%;--y:68%;--w:70%;--h:10%}.scanbox{position:absolute;left:var(--x);top:var(--y);width:var(--w);height:var(--h);border:3px solid #ef4444;border-radius:10px;box-shadow:0 0 0 9999px rgba(0,0,0,.30);touch-action:none}.scanbox:after{content:"↘";position:absolute;right:-14px;bottom:-14px;width:30px;height:30px;border-radius:50%;display:grid;place-items:center;background:#ef4444;color:white;font-weight:900;font-size:18px}.scanlabel{position:absolute;left:10px;top:10px;background:rgba(239,68,68,.92);color:white;padding:4px 8px;border-radius:7px;font-size:.72rem;font-weight:700;pointer-events:none;z-index:2}.rangegrid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}.rangegrid label{font-size:.78rem;color:#aab7cf}.rangegrid input{width:100%;padding:0}button,input{font:inherit;border-radius:10px;border:1px solid #42506a;padding:11px}button{background:#26344d;color:white;font-weight:650}.primary{background:#2563eb}.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.row>*{flex:1;min-width:110px}.result{font-size:1.3rem;font-weight:750;text-align:center;padding:12px;background:#0e1727;border-radius:12px;margin-top:10px}.small{font-size:.82rem;color:#aab7cf}.item{display:flex;gap:10px;align-items:center;border-top:1px solid #2b374d;padding:10px 2px}.item span{flex:1}canvas{display:none}</style></head><body><main><h2>🔥 Melder Scanner</h2><div class="card"><div id="status" class="small">Kamera noch nicht gestartet.</div><div class="camera" id="camera"><video id="video" playsinline autoplay muted></video><div class="scanlabel">Scanbereich – roten Rahmen verschieben</div><div class="scanbox" id="scanbox"></div></div><canvas id="canvas"></canvas>
+<div class="row"><label for="mode">Displaytyp</label><select id="mode" style="flex:2;background:#26344d;color:white;padding:11px;border-radius:10px"><option value="bma">Brandmeldezentrale (Gruppe / Melder)</option><option value="fat">Feuerwehr-Anzeigetableau (letzte Meldung unten)</option></select></div><div class="rangegrid"><label>Breite <input id="rw" type="range" min="20" max="95" value="70"></label><label>Höhe <input id="rh" type="range" min="6" max="45" value="10"></label></div>
+<div class="row"><button id="resetbox">Scanbereich zurücksetzen</button></div><div class="row"><button class="primary" id="start">Kamera starten</button><button id="scan">Scannen</button><button id="auto">Auto-Scan</button><button id="stop">Stop</button></div><label style="display:flex;align-items:center;gap:10px;margin-top:12px"><input type="checkbox" id="voice" checked style="width:22px;height:22px"> Neue Melder vorlesen</label><div id="result" class="result">Gruppe – / Melder –</div><div id="ocr" class="small"></div><div class="small" style="margin-top:8px">Erkannter Bildausschnitt:</div><canvas id="preview" style="display:block;width:100%;max-height:110px;object-fit:contain;background:#101827;border-radius:8px"></canvas></div><div class="card"><b>Manuell hinzufügen</b><div class="row"><input id="group" inputmode="numeric" placeholder="Gruppe"><input id="detector" inputmode="numeric" placeholder="Melder"><button id="add">Hinzufügen</button></div></div><div class="card"><b>Geprüfte Melder</b><div id="list"></div><div class="row"><button id="csv">CSV exportieren</button><button id="clear">Liste löschen</button></div></div><div class="card small">OCR-Ergebnisse vor sicherheitsrelevanter Verwendung am Originaldisplay kontrollieren.</div></main><script>
+const $=x=>document.getElementById(x),v=$('video'),c=$('canvas'),st=$('status');let stream,timer,busy=false,last='',hits=0,worker=null,lastAnnounced='',items=JSON.parse(localStorage.getItem('melder-items')||'[]');
+function render(){$('list').innerHTML=items.length?items.map((x,i)=>`<div class="item"><span><b>Gruppe ${x.g} / Melder ${x.m}</b><br><small>${new Date(x.t).toLocaleString('de-DE')}</small></span><button onclick="del(${i})">✕</button></div>`).join(''):'<p class="small">Noch keine Melder erfasst.</p>'}function save(){localStorage.setItem('melder-items',JSON.stringify(items));render()}window.del=i=>{items.splice(i,1);save()};
+function add(g,m){g=(''+g).replace(/\D/g,'');m=(''+m).replace(/\D/g,'');if(!g||!m)return;if(!items.some(x=>x.g==g&&x.m==m)){items.unshift({g,m,t:Date.now()});save()}$('result').textContent=`Gruppe ${g} / Melder ${m}`;if($('voice').checked&&lastAnnounced!==g+'/'+m){lastAnnounced=g+'/'+m;speechSynthesis.cancel();let u=new SpeechSynthesisUtterance(`Gruppe ${g}, Melder ${m}`);u.lang='de-DE';speechSynthesis.speak(u)}}
+$('start').onclick=async()=>{try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});v.srcObject=stream;st.textContent='Kamera aktiv.'}catch(e){st.textContent='Kamerafehler: '+e.message}};
+function parse(t,mode){
+ const s=(t||'').toUpperCase().replace(/[|]/g,'1').replace(/\s+/g,' ').trim();
+ if(mode==='fat'){
+  const matches=[...s.matchAll(/(?:^|[^\d])(\d{1,4})\s*[/\\]\s*(\d{1,3})(?!\d)/g)];
+  return matches.length===1?[matches[0][1],matches[0][2]]:null;
+ }
+ const g=s.match(/GR(?:U|V|0)P{1,2}E?\s*[:;.=,_-]?\s*(\d{1,4})/i);
+ const m=s.match(/MELD(?:E|F)?R?\s*[:;.=,_-]?\s*(\d{1,3})/i);
+ if(g&&m)return[g[1],m[1]];
+ const short=s.match(/(?:^|\s)(\d{1,4})\s*[/\\]\s*(\d{1,3})(?:\s|$)/);
+ return short?[short[1],short[2]]:null;
+}
+async function getWorker(){
+ if(!worker){
+  st.textContent='OCR wird geladen …';
+  worker=await Tesseract.createWorker('deu',1);
+  await worker.setParameters({tessedit_pageseg_mode:'7',preserve_interword_spaces:'1'});
+ }
+ return worker;
+}
+async function scan(){
+ if(busy||!stream||v.readyState<2)return;
+ busy=true;st.textContent='Erkennung läuft …';
+ try{
+  const mode=$('mode').value,b=boxState(),vw=v.videoWidth,vh=v.videoHeight;
+  const sx=Math.max(0,Math.floor(vw*b.x/100)),sy=Math.max(0,Math.floor(vh*b.y/100));
+  const sw=Math.max(1,Math.min(vw-sx,Math.floor(vw*b.w/100)));
+  const sh=Math.max(1,Math.min(vh-sy,Math.floor(vh*b.h/100)));
+  const scale=Math.min(4,Math.max(1,Math.ceil(850/sw)));
+  c.width=sw*scale;c.height=sh*scale;
+  const ctx=c.getContext('2d',{willReadFrequently:true});
+  ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';
+  ctx.drawImage(v,sx,sy,sw,sh,0,0,c.width,c.height);
+  const preview=$('preview');preview.width=c.width;preview.height=c.height;
+  preview.getContext('2d').drawImage(c,0,0);
+  const w=await getWorker();
+  const {data}=await w.recognize(c);
+  let raw=(data.text||'').trim(),p=parse(raw,mode);
+  $('ocr').textContent='OCR: '+(raw.replace(/\s+/g,' ').slice(0,160)||'(kein Text)');
+  if(p){
+   const k=mode+':'+p.join('/');
+   hits=k===last?hits+1:1;last=k;
+   $('result').textContent=`Gruppe ${p[0]} / Melder ${p[1]} ${hits<2?'(prüfe…)':''}`;
+   if(hits>=2){add(...p);hits=0;last=''}
+   st.textContent='Erkennung erfolgreich.';
+  }else{
+   hits=0;last='';
+   st.textContent=mode==='fat'?'Keine eindeutige Nummer im Format Gruppe/Melder erkannt.':'Keine eindeutige Gruppe/Melder erkannt.';
+  }
+ }catch(e){st.textContent='OCR-Fehler: '+e.message}
+ finally{busy=false}
+}
+$('voice').checked=localStorage.getItem('melder-voice')!=='false';$('voice').onchange=()=>{localStorage.setItem('melder-voice',String($('voice').checked));if(!$('voice').checked)speechSynthesis.cancel()};
+$('mode').onchange=()=>{hits=0;last='';$('result').textContent='Gruppe – / Melder –'};
+$('scan').onclick=scan;$('auto').onclick=()=>{if(!timer){scan();timer=setInterval(scan,1200)}};$('stop').onclick=()=>{clearInterval(timer);timer=null;if(stream){stream.getTracks().forEach(x=>x.stop());stream=null}st.textContent='Gestoppt.'};$('add').onclick=()=>add($('group').value,$('detector').value);$('clear').onclick=()=>{if(confirm('Liste wirklich löschen?')){items=[];save()}};$('csv').onclick=()=>{let s='Gruppe;Melder;Zeit\n'+items.map(x=>`${x.g};${x.m};${new Date(x.t).toLocaleString('de-DE')}`).join('\n'),a=document.createElement('a');a.href=URL.createObjectURL(new Blob([s],{type:'text/csv'}));a.download='melder.csv';a.click()};
+const cam=$('camera'),box=$('scanbox'),rw=$('rw'),rh=$('rh');let bs=JSON.parse(localStorage.getItem('scan-box')||'{"x":15,"y":68,"w":70,"h":10}');
+function clamp(n,a,b){return Math.max(a,Math.min(b,n))}function boxState(){return bs}
+function applyBox(){bs.w=clamp(+rw.value,20,95);bs.h=clamp(+rh.value,6,45);bs.x=clamp(bs.x,0,100-bs.w);bs.y=clamp(bs.y,0,100-bs.h);cam.style.setProperty('--x',bs.x+'%');cam.style.setProperty('--y',bs.y+'%');cam.style.setProperty('--w',bs.w+'%');cam.style.setProperty('--h',bs.h+'%');localStorage.setItem('scan-box',JSON.stringify(bs))}
+rw.value=bs.w;rh.value=bs.h;applyBox();rw.oninput=()=>{bs.w=+rw.value;applyBox()};rh.oninput=()=>{bs.h=+rh.value;applyBox()};$('resetbox').onclick=()=>{bs={x:15,y:68,w:70,h:10};rw.value=70;rh.value=10;applyBox()};
+let drag=null;box.addEventListener('pointerdown',e=>{e.preventDefault();box.setPointerCapture(e.pointerId);let r=cam.getBoundingClientRect();drag={px:e.clientX,py:e.clientY,x:bs.x,y:bs.y,cw:r.width,ch:r.height}});box.addEventListener('pointermove',e=>{if(!drag)return;bs.x=drag.x+(e.clientX-drag.px)/drag.cw*100;bs.y=drag.y+(e.clientY-drag.py)/drag.ch*100;applyBox()});box.addEventListener('pointerup',()=>drag=null);box.addEventListener('pointercancel',()=>drag=null);render();
+</script>
+<style>
+.topnav{display:flex;gap:8px;margin:10px 0 14px}.topnav button{flex:1}.topnav button.active{background:#2563eb;border-color:#60a5fa}.serialVideo{width:100%;max-height:40vh;object-fit:contain;background:#000;border-radius:12px}.serialField{width:100%;background:#0e1727;color:#fff;margin-top:5px}.serialTable{width:100%;border-collapse:collapse;font-size:.87rem}.serialTable th,.serialTable td{padding:9px 5px;text-align:left;border-bottom:1px solid #34415a;overflow-wrap:anywhere}.serialTable button{padding:5px 9px}.serialHint{color:#b4c4dd;font-size:.83rem;margin:8px 0}.serialLabel{display:block;margin:12px 0 5px}.serialPreview{width:100%;max-height:120px;object-fit:contain;background:#111827;border-radius:8px}.serialCard{background:#151e2e;border:1px solid #2b374d;border-radius:16px;padding:14px;margin-bottom:12px}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script>
+(()=>{
+ const main=document.querySelector('main');
+ const alarm=document.createElement('div');alarm.id='alarmPanel';
+ while(main.firstChild)alarm.appendChild(main.firstChild);
+ const nav=document.createElement('div');nav.className='topnav';nav.innerHTML='<button id="tabAlarm" class="active">🔥 Melder-Scanner</button><button id="tabSerial">▦ Seriennummern</button>';
+ main.append(nav,alarm);
+ const panel=document.createElement('section');panel.id='serialPanel';panel.hidden=true;
+ panel.innerHTML=`<h2>▦ Seriennummern-Scanner</h2>
+ <div class="serialCard"><div id="serialStatus" class="serialHint">Zuerst Melderschild, dann Data-Matrix- oder QR-Code scannen.</div>
+ <video id="serialVideo" class="serialVideo" autoplay playsinline muted></video><canvas id="serialCanvas" hidden></canvas>
+ <div class="row"><button id="serialStart" class="primary">Kamera starten</button><button id="serialStop">Kamera stoppen</button></div>
+ <div class="row"><button id="serialOcr" class="primary">Schild erkennen (OCR)</button><button id="serialQr" class="primary">Data-Matrix / QR scannen</button></div>
+ <div class="serialHint">Beim Schild die Nummer (z. B. 3/1) möglichst groß und mittig aufnehmen. Code-Erkennung läuft nach dem Antippen bis zum Treffer. Schilder jeder Farbe werden unterstützt.</div>
+ <img id="serialPreview" class="serialPreview" alt="Letzte Schildaufnahme" hidden>
+ <label class="serialLabel">Gruppe / Melder</label><input id="serialDetector" class="serialField" placeholder="z. B. 3/1" autocomplete="off">
+ <label class="serialLabel">Seriennummer aus Data-Matrix / QR</label><input id="serialNumber" class="serialField" placeholder="Code scannen oder eingeben" autocomplete="off">
+ <div class="row"><button id="serialSave" class="primary">Zuordnung speichern</button><button id="serialReset">Felder leeren</button></div></div>
+ <div class="serialCard"><b>Erfasste Seriennummern</b><div class="serialHint" id="serialCount"></div><div style="overflow-x:auto"><table class="serialTable"><thead><tr><th>Melder</th><th>Seriennummer</th><th>Aktion</th></tr></thead><tbody id="serialRows"></tbody></table></div>
+ <div class="row"><button id="serialXlsx" class="primary">Excel (.xlsx) exportieren</button><button id="serialCsv">CSV exportieren</button></div><div class="row"><button id="serialClear">Liste löschen</button></div></div>
+ <div class="serialCard small">Daten werden auf diesem Gerät gespeichert. Bitte Zuordnung vor dem Export am Melder kontrollieren. Für OCR, Code-Erkennung und Excel-Bibliotheken ist beim ersten Laden Internet erforderlich.</div>`;
+ main.append(panel);
+ const q=id=>document.getElementById(id),status=msg=>q('serialStatus').textContent=msg;
+ let serialStream=null,qrLoop=false,qrBusy=false,serialWorker=null;
+ let rows=[];try{rows=JSON.parse(localStorage.getItem('melder-serials')||'[]')}catch(e){}
+ function store(){localStorage.setItem('melder-serials',JSON.stringify(rows));render()}
+ function render(){q('serialCount').textContent=rows.length+' Zuordnungen gespeichert';q('serialRows').replaceChildren();rows.forEach((r,i)=>{const tr=document.createElement('tr');for(const val of [r.detector,r.serial]){const td=document.createElement('td');td.textContent=val;tr.append(td)}const td=document.createElement('td'),btn=document.createElement('button');btn.textContent='✕';btn.onclick=()=>{if(confirm('Eintrag löschen?')){rows.splice(i,1);store()}};td.append(btn);tr.append(td);q('serialRows').append(tr)})}
+ function stopSerial(){qrLoop=false;if(serialStream){serialStream.getTracks().forEach(t=>t.stop());serialStream=null}q('serialVideo').srcObject=null}
+ function switchTab(serial){q('serialPanel').hidden=!serial;q('alarmPanel').hidden=serial;q('tabSerial').classList.toggle('active',serial);q('tabAlarm').classList.toggle('active',!serial);if(serial){if(typeof timer!=='undefined'&&timer){clearInterval(timer);timer=null}if(typeof stream!=='undefined'&&stream){stream.getTracks().forEach(t=>t.stop());stream=null}}else stopSerial()}
+ q('tabAlarm').onclick=()=>switchTab(false);q('tabSerial').onclick=()=>switchTab(true);
+ q('serialStart').onclick=async()=>{try{stopSerial();serialStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},audio:false});q('serialVideo').srcObject=serialStream;await q('serialVideo').play();status('Kamera aktiv. Schild oder QR-Code auswählen.')}catch(e){status('Kamera-Fehler: '+e.message)}};
+ q('serialStop').onclick=()=>{stopSerial();status('Kamera gestoppt.')};
+ function frame(){const vid=q('serialVideo');if(!serialStream||vid.readyState<2)throw Error('Bitte zuerst Kamera starten.');const c=q('serialCanvas');c.width=vid.videoWidth;c.height=vid.videoHeight;c.getContext('2d',{willReadFrequently:true}).drawImage(vid,0,0);return c}
+ function extractDetector(t){const str=(t||'').replace(/[|]/g,'1');const all=[...str.matchAll(/(?:^|[^0-9])(\d{1,4})\s*[/\\]\s*(\d{1,3})(?!\d)/g)];return all.length===1?all[0][1]+'/'+all[0][2]:null}
+ q('serialOcr').onclick=async()=>{qrLoop=false;try{
+ const source=frame(),w=source.width,h=source.height;
+ const crop=document.createElement('canvas'),cx=crop.getContext('2d',{willReadFrequently:true});
+ // Only the central area: labels are normally held near the middle of the viewfinder.
+ const x=Math.floor(w*.08),y=Math.floor(h*.22),cw=Math.floor(w*.84),ch=Math.floor(h*.56);
+ const scale=Math.max(1,Math.min(3,Math.ceil(1000/cw)));
+ crop.width=cw*scale;crop.height=ch*scale;cx.drawImage(source,x,y,cw,ch,0,0,crop.width,crop.height);
+ q('serialPreview').src=crop.toDataURL('image/jpeg',.85);q('serialPreview').hidden=false;
+ status('Schild wird gelesen …');
+ if(!serialWorker)serialWorker=await Tesseract.createWorker('deu',1);
+ await serialWorker.setParameters({tessedit_pageseg_mode:'6'});
+ const original=cx.getImageData(0,0,crop.width,crop.height);
+ let detected=null,lastText='';
+ for(const threshold of [null,145,195]){
+  cx.putImageData(original,0,0);
+  if(threshold!==null){const img=cx.getImageData(0,0,crop.width,crop.height),d=img.data;
+   for(let i=0;i<d.length;i+=4){const l=.299*d[i]+.587*d[i+1]+.114*d[i+2],v=l>threshold?255:0;d[i]=d[i+1]=d[i+2]=v}cx.putImageData(img,0,0)}
+  const result=await serialWorker.recognize(crop);lastText=result.data.text||'';
+  detected=extractDetector(lastText);if(detected)break;
+ }
+ if(detected){q('serialDetector').value=detected;status('Melder '+detected+' erkannt. Bitte prüfen und Code scannen.')}
+ else status('Keine eindeutige Meldernummer. Schild mittig und groß halten oder manuell eingeben. OCR: '+lastText.replace(/\s+/g,' ').slice(0,90));
+ }catch(e){status('OCR-Fehler: '+e.message)}};
+ let zxingReader=null;
+ async function detectCode(){const c=frame();
+  if('BarcodeDetector' in window){try{const supported=await BarcodeDetector.getSupportedFormats();const formats=['data_matrix','qr_code'].filter(x=>supported.includes(x));
+   if(formats.length){const codes=await new BarcodeDetector({formats}).detect(c);if(codes.length)return codes[0].rawValue}}
+   catch(e){}}
+  if(typeof ZXing!=='undefined'){
+   try{if(!zxingReader){const hints=new Map();hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[ZXing.BarcodeFormat.DATA_MATRIX,ZXing.BarcodeFormat.QR_CODE]);zxingReader=new ZXing.BrowserMultiFormatReader(hints)}
+    const result=await zxingReader.decodeFromCanvas(c);if(result)return result.getText()}
+   catch(e){} }
+  return null;
+ }
+ q('serialQr').onclick=async()=>{if(qrLoop){qrLoop=false;status('Code-Suche gestoppt.');return}
+  try{frame()}catch(e){status(e.message);return}
+  qrLoop=true;status('Data-Matrix / QR wird gesucht … Taste erneut drücken zum Abbrechen.');
+  while(qrLoop){if(!qrBusy){qrBusy=true;try{const val=await detectCode();if(val){
+    // Codes containing only a serial number are stored as-is. Do not invent or truncate values.
+    q('serialNumber').value=val.trim();qrLoop=false;
+    status('Code erkannt: '+val.trim()+'. Bitte Seriennummer und Meldernummer prüfen und speichern.');break}}
+   catch(e){status('Code-Fehler: '+e.message);qrLoop=false}finally{qrBusy=false}}
+   await new Promise(r=>setTimeout(r,400))}
+ };
+ q('serialSave').onclick=()=>{const d=q('serialDetector').value.trim().replace(/\s+/g,''),serial=q('serialNumber').value.trim();if(!/^\d{1,4}\/\d{1,3}$/.test(d)){status('Bitte gültige Meldernummer im Format 3/1 eingeben.');return}if(!serial){status('Bitte Seriennummer per Code scannen oder eingeben.');return}if(rows.some(r=>r.detector===d||r.serial===serial)){status('Melder oder Seriennummer bereits vorhanden. Bitte Einträge prüfen.');return}rows.unshift({detector:d,serial,date:new Date().toISOString()});store();q('serialDetector').value='';q('serialNumber').value='';status('Zuordnung '+d+' gespeichert. Nächsten Melder scannen.')};
+ q('serialReset').onclick=()=>{qrLoop=false;q('serialDetector').value='';q('serialNumber').value='';status('Felder geleert.')};
+ const exportData=()=>rows.map(r=>({'Meldernummer':r.detector,'Seriennummer':r.serial,'Erfasst am':new Date(r.date).toLocaleString('de-DE')}));
+ function download(blob,name){const a=document.createElement('a');const url=URL.createObjectURL(blob);a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),5000)}
+ q('serialXlsx').onclick=()=>{if(!rows.length){status('Keine Daten zum Exportieren.');return}if(typeof XLSX==='undefined'){status('Excel-Bibliothek nicht geladen. CSV-Export ist verfügbar.');return}const wb=XLSX.utils.book_new(),ws=XLSX.utils.json_to_sheet(exportData());ws['!cols']=[{wch:19},{wch:36},{wch:24}];XLSX.utils.book_append_sheet(wb,ws,'Seriennummern');XLSX.writeFile(wb,'melder-seriennummern.xlsx')};
+ q('serialCsv').onclick=()=>{if(!rows.length){status('Keine Daten zum Exportieren.');return}const escape=v=>'"'+String(v).replace(/"/g,'""')+'"';const lines=[['Meldernummer','Seriennummer','Erfasst am'],...exportData().map(r=>Object.values(r))].map(r=>r.map(escape).join(';')).join('\r\n');download(new Blob(['\ufeff'+lines],{type:'text/csv;charset=utf-8'}),'melder-seriennummern.csv')};
+ q('serialClear').onclick=()=>{if(confirm('Alle Seriennummern-Zuordnungen wirklich löschen?')){rows=[];store();status('Liste gelöscht.')}};
+ render();
+})();
+</script>
+</body></html>
